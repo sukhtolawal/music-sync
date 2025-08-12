@@ -2,6 +2,8 @@ import * as React from 'react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { io, Socket } from 'socket.io-client'
 import { useTimeSync } from './lib/useTimeSync'
+import { useRoomPresence } from './hooks/useRoomPresence'
+import { ParticipantsSidebar } from './components/ParticipantsSidebar'
 
 const SERVER_URL = `${window.location.protocol}//${window.location.hostname}:4000`
 
@@ -44,8 +46,7 @@ export default function App() {
   const [plannedStartServerMs, setPlannedStartServerMs] = useState<number | null>(null);
   // Proxy is always automatic via backend now; no UI toggle
   const [uploading, setUploading] = useState(false); // deprecated with songs picker
-  const [ownerName, setOwnerName] = useState<string>('');
-  const [participants, setParticipants] = useState<string[]>([]);
+  const { ownerName, participants } = useRoomPresence(socket)
   const [songsOpen, setSongsOpen] = useState(false);
   const [songs, setSongs] = useState<{ name: string; url: string }[]>([]);
   const [songQuery, setSongQuery] = useState('');
@@ -57,6 +58,10 @@ export default function App() {
 
   const [audioUnlocked, setAudioUnlocked] = useState(false)
   const [audioError, setAudioError] = useState<string | null>(null)
+  // Persist/restore helpers
+  const autoJoinRequestedRef = useRef(false)
+
+  // Removed contextual popup state; sidebar has inline action
 
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const correctionTimerRef = useRef<number | null>(null)
@@ -67,7 +72,16 @@ export default function App() {
   const [previewSec, setPreviewSec] = useState<number | null>(null)
   const draggingRef = useRef(false)
 
-  useEffect(() => { setView('lobby') }, [])
+  useEffect(() => {
+    setView('lobby')
+    // Restore saved username and room on first load
+    try {
+      const savedName = localStorage.getItem('ms_username') || ''
+      const savedRoom = localStorage.getItem('ms_roomId') || ''
+      if (savedName) setUsername(savedName)
+      if (savedRoom) setRoomId(savedRoom)
+    } catch {}
+  }, [])
 
   // Backend health heartbeat
   useEffect(() => {
@@ -92,7 +106,12 @@ export default function App() {
     const onInit = (state: any) => {
       if (state.trackUrl) setTrackUrl(state.trackUrl)
       if (state.isPlaying && typeof state.startTimeMs === 'number') {
-        schedulePlay(state.positionSec ?? 0, state.startTimeMs, { positionIsCurrent: true })
+        // Always ensure we are at least locally aligned immediately
+        const serverNow = serverNowMs()
+        const elapsedSec = Math.max(0, (serverNow - state.startTimeMs) / 1000)
+        const currentAtNow = Math.max(0, (state.positionSec ?? 0))
+        const baseAtStart = Math.max(0, currentAtNow - elapsedSec)
+        schedulePlay(baseAtStart, state.startTimeMs, { positionIsCurrent: false })
       } else {
         cancelDriftCorrection()
         const audio = audioRef.current
@@ -126,11 +145,7 @@ export default function App() {
     }
     socket.on('state:update', onStateUpdate)
 
-    const onRoomInfo = (info: any) => {
-      setOwnerName(info.ownerName ?? null)
-      setParticipants(Array.isArray(info.participants) ? info.participants : [])
-    }
-    socket.on('room:info', onRoomInfo)
+    // room presence handled by useRoomPresence
 
     const onDenied = ({ reason }: any) => {
       setAudioError(reason || 'Only the owner can control playback')
@@ -172,26 +187,77 @@ export default function App() {
     }
     socket.on('seek', onSeek)
 
+    // owner updates handled by useRoomPresence
+
     return () => {
       socket.off('state:init', onInit)
       socket.off('state:update', onStateUpdate)
-      socket.off('room:info', onRoomInfo)
+      // handled by presence hook
       socket.off('control:denied', onDenied)
       socket.off('play', onPlay)
       socket.off('pause', onPause)
       socket.off('seek', onSeek)
+      // handled by presence hook
     }
   }, [socket, offsetMs])
 
-  // Listen for server acknowledgment of name
+  // Auto set name from saved username after connect
+  useEffect(() => {
+    if (!connected) return
+    const desired = username.trim()
+    if (!desired) return
+    if (nameSet) return
+    setSettingName(true)
+    socket.emit('user:setName', desired, () => {
+      setSettingName(false)
+      // user:ready handler will flip nameSet
+    })
+  }, [connected, username, nameSet, socket])
+
+  // Auto-join saved room after name is set
+  useEffect(() => {
+    if (!connected || !nameSet) return
+    const saved = (roomId || '').trim()
+    if (!saved) return
+    if (view === 'room') return
+    if (autoJoinRequestedRef.current) return
+    autoJoinRequestedRef.current = true
+    socket.emit('room:join', saved, (resp: any) => {
+      if (resp?.ok) {
+        setRoomId(saved)
+        setView('room')
+      } else {
+        try { localStorage.removeItem('ms_roomId') } catch {}
+      }
+    })
+  }, [connected, nameSet])
+
+  // Persist username and room id
+  useEffect(() => {
+    try {
+      const clean = username.trim()
+      if (clean) localStorage.setItem('ms_username', clean)
+    } catch {}
+  }, [username])
+  useEffect(() => {
+    try {
+      if (view === 'room' && roomId) localStorage.setItem('ms_roomId', roomId)
+      if (view === 'lobby') localStorage.removeItem('ms_roomId')
+    } catch {}
+  }, [view, roomId])
+
+  // Listen for server acknowledgment of name (normalize to server-trimmed value)
   useEffect(() => {
     const onReady = ({ username: u }: any) => {
-      if (u && u === username) setNameSet(true)
+      if (typeof u === 'string' && u.trim()) {
+        setUsername(u)
+        setNameSet(true)
+      }
       setSettingName(false)
     }
     socket.on('user:ready', onReady)
     return () => { socket.off('user:ready', onReady) }
-  }, [socket, username])
+  }, [socket])
 
   useEffect(() => {
     const audio = audioRef.current
@@ -297,6 +363,9 @@ export default function App() {
 
     cancelDriftCorrection()
 
+    // Ensure browser allows playback (handles autoplay restrictions)
+    try { await primeAudio() } catch {}
+
     // If positionSec is already the current position at server time now,
     // use server now as the effective start so drift correction begins from zero offset.
     const serverNow = serverNowMs()
@@ -311,7 +380,8 @@ export default function App() {
     audio.pause()
     await waitForReady(audio)
 
-    const lateBySec = options?.positionIsCurrent ? 0 : Math.max(0, -deltaMs / 1000)
+    // If the start time is in the past, compute how much time has already elapsed since then.
+    const lateBySec = options?.positionIsCurrent ? 0 : Math.max(0, (serverNow - effectiveStartAtServerMs) / 1000)
     audio.currentTime = positionSec + lateBySec
     setCurrentSec(audio.currentTime)
 
@@ -325,14 +395,32 @@ export default function App() {
           setAudioError(null)
           setTimeout(() => { try { audio.muted = false } catch {} }, 150)
         })
-        .catch(() => setAudioError('Playback failed. Check browser autoplay settings or try again.'))
+        .catch(() => {
+          setAudioUnlocked(false)
+          setAudioError('Playback blocked. Click Play to start.')
+          // Retry once after a short delay in case the browser unlocks due to a recent interaction
+          setTimeout(() => {
+            audio.play().then(() => {
+              setAudioUnlocked(true)
+              setAudioError(null)
+              try { audio.muted = false } catch {}
+            }).catch(() => {})
+          }, 600)
+        })
       startDriftCorrection(positionSec, effectiveStartAtServerMs)
       setIsPlaying(true)
     }
 
-    if (deltaMs > 10) {
+    if (deltaMs > 30) {
+      // Schedule start at the planned time; pre-warm the element quietly
+      try { audio.muted = true } catch {}
+      audio.play().then(() => { audio.pause() }).catch(() => {})
       window.setTimeout(start, deltaMs)
+    } else if (deltaMs < -50) {
+      // Already late; start immediately at computed offset
+      start()
     } else {
+      // Very close; start now
       start()
     }
   }
@@ -554,71 +642,84 @@ export default function App() {
         <div className="error" role="status">Connection lost. Trying to reconnect…</div>
       )}
 
-      <div className="card">
-        <h2 style={{ marginTop: 0 }}>Room {roomId}</h2>
-        <div className="row">
-          <span className="helper">User: {username}</span>
-          <span className="helper">Owner: {ownerName ?? 'none'}</span>
-          <span className="helper">offset: {offsetMs} ms</span>
-          <span className="helper">rtt: {rttMs ?? '-'} ms</span>
-          {/* Proxy is automatic (no toggle) */}
-        </div>
+      <div className="layout">
+        <div className="card" style={{ flex: 1 }}>
+          <h2 style={{ marginTop: 0 }}>Room {roomId}</h2>
+          <div className="row">
+            <span className="helper">User: {username}</span>
+            <span className="helper">Owner: {ownerName ?? 'none'}</span>
+            <span className="helper">offset: {offsetMs} ms</span>
+            <span className="helper">rtt: {rttMs ?? '-'} ms</span>
+          </div>
 
-        <div className="row" style={{ marginTop: 12 }}>
-          <button className="button" onClick={openSongs} disabled={!canControl} title={canControl?undefined:'Only owner can pick songs'}>
-            Songs
-          </button>
-        </div>
+          <div className="row" style={{ marginTop: 12 }}>
+            <button className="button" onClick={openSongs} disabled={!canControl} title={canControl?undefined:'Only owner can pick songs'}>
+              Songs
+            </button>
+          </div>
 
-        {/* Custom player */}
-        <div className="player section">
-          <button className="iconBtn" onClick={() => canControl && seekBy(-5)} disabled={!canControl} title="Back 5s" aria-label="Back 5 seconds">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M11 19A7 7 0 1 1 18 12" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/><path d="M12 5V2l-3 3 3 3V5z" fill="currentColor"/></svg>
-          </button>
-          <button className={`iconBtn ${canControl ? 'primary' : ''}`} onClick={() => (isPlaying ? pause() : play())} disabled={!canControl} aria-label={isPlaying? 'Pause':'Play'}>
-            {isPlaying ? (
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
-            ) : (
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><path d="M7 5l12 7-12 7V5z"/></svg>
-            )}
-          </button>
-          <button className="iconBtn" onClick={() => canControl && seekBy(5)} disabled={!canControl} title="Forward 5s" aria-label="Forward 5 seconds">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M13 5a7 7 0 1 1-7 7" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/><path d="M12 5V2l3 3-3 3V5z" fill="currentColor"/></svg>
-          </button>
+          <div className="player section">
+            <button className="iconBtn" onClick={() => canControl && seekBy(-5)} disabled={!canControl} title="Back 5s" aria-label="Back 5 seconds">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M11 19A7 7 0 1 1 18 12" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/><path d="M12 5V2l-3 3 3 3V5z" fill="currentColor"/></svg>
+            </button>
+            <button className={`iconBtn ${canControl ? 'primary' : ''}`} onClick={() => (isPlaying ? pause() : play())} disabled={!canControl} aria-label={isPlaying? 'Pause':'Play'}>
+              {isPlaying ? (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
+              ) : (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><path d="M7 5l12 7-12 7V5z"/></svg>
+              )}
+            </button>
+            <button className="iconBtn" onClick={() => canControl && seekBy(5)} disabled={!canControl} title="Forward 5s" aria-label="Forward 5 seconds">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M13 5a7 7 0 1 1-7 7" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/><path d="M12 5V2l3 3-3 3V5z" fill="currentColor"/></svg>
+            </button>
 
-          <div className="progress"
-            onPointerDown={handleProgressDown}
-            onPointerMove={handleProgressMove}
-            onPointerUp={handleProgressUp}
-            onPointerCancel={handleProgressUp}
-          >
-            <div className="progressBar">
-              <div className="progressBuffered" style={{ width: `${Math.min(100, bufferedPct)}%` }} />
-              <div className="progressFill" style={{ width: `${Math.min(100, progressPct)}%` }} />
-              <div className="progressKnob" style={{ left: `${Math.min(100, progressPct)}%` }} />
-            </div>
-            <div className="timeRow">
-              <span>{fmt(previewSec ?? currentSec)}</span>
-              <span>{fmt(durationSec || 0)}</span>
+            <div className="progress"
+              onPointerDown={handleProgressDown}
+              onPointerMove={handleProgressMove}
+              onPointerUp={handleProgressUp}
+              onPointerCancel={handleProgressUp}
+            >
+              <div className="progressBar">
+                <div className="progressBuffered" style={{ width: `${Math.min(100, bufferedPct)}%` }} />
+                <div className="progressFill" style={{ width: `${Math.min(100, progressPct)}%` }} />
+                <div className="progressKnob" style={{ left: `${Math.min(100, progressPct)}%` }} />
+              </div>
+              <div className="timeRow">
+                <span>{fmt(previewSec ?? currentSec)}</span>
+                <span>{fmt(durationSec || 0)}</span>
+              </div>
             </div>
           </div>
+
+          {audioError && (
+            <div className="error">{audioError}</div>
+          )}
+
+          <audio
+            ref={audioRef}
+            src={resolveSrc(trackUrl) || undefined}
+            preload="auto"
+            playsInline
+            className="audio"
+          />
+
+          <p className="helper" style={{ marginTop: 12 }}>
+            Only the room owner can control playback.
+          </p>
         </div>
 
-        {audioError && (
-          <div className="error">{audioError}</div>
-        )}
-
-        <audio
-          ref={audioRef}
-          src={resolveSrc(trackUrl) || undefined}
-          preload="auto"
-          playsInline
-          className="audio"
+        <ParticipantsSidebar
+          username={username}
+          ownerName={ownerName}
+          participants={participants}
+          onMakeAdmin={(target) => {
+            if (!roomId) return
+            socket.emit('room:transferOwner', { roomId, newOwnerName: target }, (resp: any) => {
+              if (!resp?.ok) setAudioError(resp?.reason || 'Failed to transfer ownership')
+              else try { window.location.reload() } catch {}
+            })
+          }}
         />
-
-        <p className="helper" style={{ marginTop: 12 }}>
-          Only the room owner can control playback. The creator of the room is the owner.
-        </p>
       </div>
       {songsOpen && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.5)', display: 'grid', placeItems: 'center', zIndex: 50 }} onClick={() => setSongsOpen(false)}>

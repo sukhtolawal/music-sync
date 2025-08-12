@@ -31,6 +31,7 @@ app.use(express.json());
 // In-memory storage
 const users = new Map<string, { username: string }>();
 const rooms = new Map<string, { ownerId: string; participants: string[] }>();
+const sessions = new Map<string, { username?: string; roomId?: string }>();
 const playbackStates = new Map<string, {
   isPlaying: boolean;
   positionSec: number;
@@ -191,12 +192,31 @@ function getCurrentPositionSec(roomId: string): number {
   return state.positionSec + elapsed;
 }
 
+function buildRoomState(roomId: string) {
+  const room = rooms.get(roomId)
+  return {
+    roomId,
+    ownerName: room?.ownerId ?? '',
+    participants: room?.participants ?? [],
+  }
+}
+
 // Socket.IO connection handling
 io.on('connection', (socket) => {
   console.log('Client connected:', socket.id);
   
   let currentUser: string | null = null;
   let currentRoom: string | null = null;
+  let sessionToken: string | null = null;
+
+  // Session identify and restore
+  socket.on('session:identify', (token: string, callback?: (r: any) => void) => {
+    const clean = typeof token === 'string' ? token.trim() : ''
+    if (!clean) { callback?.({ ok: false }); return }
+    sessionToken = clean
+    const s = sessions.get(clean)
+    callback?.({ ok: true, username: s?.username ?? null, roomId: s?.roomId ?? null })
+  });
 
   // Set display name (no auth)
   socket.on('user:setName', (name: string, callback?: (r: any) => void) => {
@@ -206,6 +226,14 @@ io.on('connection', (socket) => {
       return;
     }
     currentUser = trimmed.slice(0, 32);
+    users.set(socket.id, { username: currentUser })
+    if (sessionToken) {
+      const s = sessions.get(sessionToken) || {}
+      s.username = currentUser
+      sessions.set(sessionToken, s)
+    }
+    // store on socket for lookups later
+    try { (socket as any).data = { ...(socket as any).data, username: currentUser }; } catch {}
     socket.emit('user:ready', { username: currentUser });
     callback?.({ ok: true, username: currentUser });
     console.log('User set name:', currentUser);
@@ -223,12 +251,16 @@ io.on('connection', (socket) => {
     currentRoom = roomId;
     
     socket.join(roomId);
+    // Persist into session
+    if (sessionToken) {
+      const s = sessions.get(sessionToken) || {}
+      s.roomId = roomId
+      s.username = currentUser
+      sessions.set(sessionToken, s)
+    }
     // Inform creator about room info
-    io.to(roomId).emit('room:info', {
-      roomId,
-      ownerName: currentUser,
-      participants: rooms.get(roomId)?.participants ?? [currentUser]
-    });
+    io.to(roomId).emit('room:info', buildRoomState(roomId));
+    io.to(roomId).emit('room:state', buildRoomState(roomId));
     callback({ ok: true, roomId, ownerName: currentUser });
     console.log('Room created:', roomId, 'by:', currentUser);
   });
@@ -256,22 +288,40 @@ io.on('connection', (socket) => {
     // Send current playback state to the joining user
     const playbackState = playbackStates.get(roomId);
     if (playbackState) {
+      const now = Date.now();
       const currentPosition = getCurrentPositionSec(roomId);
       socket.emit('state:init', {
         trackUrl: playbackState.trackUrl,
         isPlaying: playbackState.isPlaying,
         positionSec: currentPosition,
         startTimeMs: playbackState.isPlaying ? playbackState.startTime : null,
-        serverNowMs: Date.now()
+        serverNowMs: now
       });
+
+      // If already playing, schedule a per-socket catch-up start a bit in the future
+      if (playbackState.isPlaying) {
+        const joinStartDelayMs = 2500; // give the new client time to buffer and unlock audio
+        const plannedStartAtMs = now + joinStartDelayMs;
+        const delaySec = joinStartDelayMs / 1000;
+        const baseAtStart = currentPosition + delaySec;
+        socket.emit('play', {
+          trackUrl: playbackState.trackUrl,
+          positionSec: baseAtStart,
+          startAtServerMs: plannedStartAtMs
+        });
+      }
     }
     
+    // Persist into session
+    if (sessionToken) {
+      const s = sessions.get(sessionToken) || {}
+      s.roomId = roomId
+      s.username = currentUser
+      sessions.set(sessionToken, s)
+    }
     // Send room info to all clients in the room
-    io.to(roomId).emit('room:info', {
-      roomId,
-      ownerName: room.ownerId,
-      participants: room.participants
-    });
+    io.to(roomId).emit('room:info', buildRoomState(roomId));
+    io.to(roomId).emit('room:state', buildRoomState(roomId));
     
     callback({ ok: true, roomId, ownerName: room.ownerId });
     console.log('User joined room:', roomId, 'user:', currentUser);
@@ -351,6 +401,7 @@ io.on('connection', (socket) => {
       positionSec: state.positionSec,
       startAtServerMs: plannedStartAtMs
     });
+    io.to(roomId).emit('room:state', buildRoomState(roomId));
     console.log('Play in room:', roomId, 'by:', currentUser);
   });
 
@@ -379,6 +430,7 @@ io.on('connection', (socket) => {
       positionSec: currentPosition,
       serverNowMs: Date.now()
     });
+    io.to(roomId).emit('room:state', buildRoomState(roomId));
     console.log('Pause in room:', roomId, 'by:', currentUser);
   });
 
@@ -417,7 +469,60 @@ io.on('connection', (socket) => {
         startAtServerMs: null
       });
     }
+    io.to(roomId).emit('room:state', buildRoomState(roomId));
     console.log('Seek in room:', roomId, 'by:', currentUser, 'to:', positionSec);
+  });
+
+  // Transfer room ownership (admin action)
+  socket.on('room:transferOwner', (data: { roomId: string; newOwnerName: string }, callback?: (r: any) => void) => {
+    try {
+      const { roomId, newOwnerName } = data || ({} as any);
+      if (!roomId || typeof newOwnerName !== 'string' || !newOwnerName.trim()) {
+        callback?.({ ok: false, reason: 'Invalid payload' });
+        return;
+      }
+
+      const room = rooms.get(roomId);
+      if (!room) {
+        callback?.({ ok: false, reason: 'Room not found' });
+        return;
+      }
+      if (room.ownerId !== currentUser) {
+        callback?.({ ok: false, reason: 'Only the owner can transfer ownership' });
+        return;
+      }
+      const target = newOwnerName.trim();
+      if (!room.participants.includes(target)) {
+        callback?.({ ok: false, reason: 'Target user is not in the room' });
+        return;
+      }
+      if (target === room.ownerId) {
+        callback?.({ ok: false, reason: 'User is already the owner' });
+        return;
+      }
+
+      room.ownerId = target;
+      // Broadcast updated room info and explicit owner change
+      io.to(roomId).emit('room:ownerChanged', room.ownerId);
+      io.to(roomId).emit('room:info', buildRoomState(roomId));
+      io.to(roomId).emit('room:state', buildRoomState(roomId));
+      // Notify both sides explicitly
+      io.in(roomId).fetchSockets().then((sockets) => {
+        try {
+          const by = currentUser
+          const to = target
+          const prevOwnerSocket = sockets.find(s => (s as any).data?.username === by);
+          const newOwnerSocket = sockets.find(s => (s as any).data?.username === to);
+          prevOwnerSocket?.emit('role:update', { role: 'member', ownerName: room.ownerId });
+          newOwnerSocket?.emit('role:update', { role: 'owner', ownerName: room.ownerId });
+        } catch {}
+      }).catch(() => {})
+      callback?.({ ok: true, ownerName: room.ownerId });
+      console.log('Ownership transferred in room:', roomId, 'to:', room.ownerId, 'by:', currentUser);
+    } catch (e) {
+      console.error('transferOwner error:', e);
+      callback?.({ ok: false, reason: 'Transfer failed' });
+    }
   });
 
   // Get current playback state
