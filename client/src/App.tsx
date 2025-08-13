@@ -7,6 +7,7 @@ import { ParticipantsSidebar } from './components/ParticipantsSidebar'
 import { PlayerBar } from './components/PlayerBar'
 import { ChatWidget } from './components/ChatWidget'
 import { FaComments } from 'react-icons/fa'
+import { MdQueueMusic } from 'react-icons/md'
 import { gsap } from 'gsap'
 import { ParticipantsDrawer } from './components/ParticipantsDrawer'
 import { QueueWidget } from './components/QueueWidget'
@@ -71,6 +72,8 @@ export default function App() {
   const chatAnimRef = useRef<gsap.core.Tween | gsap.core.Timeline | null>(null)
   // Queue floating panel
   const [queueOpen, setQueueOpen] = useState(false)
+  // Track whether a username was restored so we can auto-set only in that case
+  const restoredNameRef = useRef<string | null>(null)
   const visibleSongs = useMemo(() => {
     const q = songQuery.trim().toLowerCase()
     if (!q) return songs
@@ -100,6 +103,7 @@ export default function App() {
       const savedName = localStorage.getItem('ms_username') || ''
       const savedRoom = localStorage.getItem('ms_roomId') || ''
       if (savedName) setUsername(savedName)
+      if (savedName) restoredNameRef.current = savedName
       if (savedRoom) setRoomId(savedRoom)
     } catch {}
   }, [])
@@ -251,18 +255,18 @@ export default function App() {
     })
   }, [connected, nameSet, roomId, socket])
 
-  // Auto set name from saved username after connect
+  // Auto set name only when restoring a previously saved username
   useEffect(() => {
     if (!connected) return
-    const desired = username.trim()
-    if (!desired) return
     if (nameSet) return
+    const restored = restoredNameRef.current?.trim()
+    if (!restored) return
     setSettingName(true)
-    socket.emit('user:setName', desired, () => {
+    socket.emit('user:setName', restored, () => {
       setSettingName(false)
-      // user:ready handler will flip nameSet
     })
-  }, [connected, username, nameSet, socket])
+    restoredNameRef.current = null
+  }, [connected, nameSet, socket])
 
   // Auto-join saved room after name is set
   useEffect(() => {
@@ -590,10 +594,11 @@ export default function App() {
   const selectSong = async (songUrl: string) => {
     if (!roomId) return
     const absolute = songUrl.startsWith('http') ? songUrl : `${SERVER_URL}${songUrl}`
+    const name = visibleSongs.find(s => s.url === songUrl || `${SERVER_URL}${s.url}` === absolute)?.name || ''
     setTrackUrl(absolute)
-    setTrackName(visibleSongs.find(s => s.url === songUrl || `${SERVER_URL}${s.url}` === absolute)?.name || '')
+    setTrackName(name)
     await primeAudio()
-    socket.emit('control:load', { roomId, trackUrl: absolute, trackName })
+    socket.emit('control:load', { roomId, trackUrl: absolute, trackName: name })
     socket.emit('control:play', { roomId })
     setSongsOpen(false)
   }
@@ -724,6 +729,8 @@ export default function App() {
 
   return (
     <div className="container">
+      {/* Hidden audio element used for precise playback control */}
+      <audio ref={audioRef} className="audio" src={resolveSrc(trackUrl)} preload="auto" crossOrigin="anonymous" />
       <div className="header">
         <div className="brand">sukh ❤️ simer</div>
         <button className="button secondary mobileOnly" onClick={() => setDrawerOpen(true)}>Group</button>
@@ -774,21 +781,23 @@ export default function App() {
         }}
       />
 
-      {/* Floating Chat Button */}
-      {!chatOpen && (
-        <button className="chatFab" style={{ position: 'fixed' }} onClick={() => {
-          setChatOpen(true)
-          setUnreadChat(0)
-        }} aria-label="Open chat">
-          <FaComments size={22} />
-          {unreadChat > 0 && <span className="chatBadge">{Math.min(99, unreadChat)}</span>}
-        </button>
-      )}
-
-      {/* Floating Queue Button (only if queue has items) */}
-      {queue.length > 0 && !queueOpen && (
-        <button className="queueFab" onClick={() => setQueueOpen(true)} aria-label="Open queue">Queue</button>
-      )}
+      {/* Desktop floating actions (right: chat) */}
+      <div className="fabGroup desktopOnly">
+        {!chatOpen && (
+          <button className="fabBtn" onClick={() => { setChatOpen(true); setUnreadChat(0) }} aria-label="Open chat" title="Chat">
+            <FaComments size={22} />
+            {unreadChat > 0 && <span className="chatBadge">{Math.min(99, unreadChat)}</span>}
+          </button>
+        )}
+      </div>
+      {/* Desktop floating actions (left: queue) */}
+      <div className="fabLeftGroup desktopOnly">
+        {queue.length > 0 && !queueOpen && (
+          <button className="fabBtn" onClick={() => setQueueOpen(true)} aria-label="Open queue" title="Queue">
+            <MdQueueMusic size={22} />
+          </button>
+        )}
+      </div>
 
       {/* Chat Panel */}
       <ChatWidget
@@ -809,6 +818,30 @@ export default function App() {
         onRemove={removeQueueItem}
         onClose={() => setQueueOpen(false)}
       />
+
+      {/* Mobile bottom navigation (chat + queue) */}
+      {!songsOpen && !chatOpen && !queueOpen && (
+        <div className="mobileNav mobileOnly">
+          <button
+            className="mobileNavBtn"
+            onClick={() => { setChatOpen(true); setUnreadChat(0) }}
+            aria-label="Open chat"
+          >
+            <FaComments size={22} />
+            {unreadChat > 0 && <span className="mobileNavBadge">{Math.min(99, unreadChat)}</span>}
+            <span className="mobileNavLabel">Chat</span>
+          </button>
+          <button
+            className="mobileNavBtn"
+            onClick={() => setQueueOpen(true)}
+            aria-label="Open queue"
+          >
+            <MdQueueMusic size={24} />
+            {queue.length > 0 && <span className="mobileNavBadge">{Math.min(99, queue.length)}</span>}
+            <span className="mobileNavLabel">Queue</span>
+          </button>
+        </div>
+      )}
 
       {songsOpen && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.5)', display: 'grid', placeItems: 'center', zIndex: 50 }} onClick={() => setSongsOpen(false)}>

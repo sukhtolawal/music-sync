@@ -3,6 +3,8 @@ import { createServer } from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
 import multer, { diskStorage } from 'multer';
+import compression from 'compression';
+import helmet from 'helmet';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join, extname } from 'path';
@@ -27,6 +29,13 @@ const io = new Server(server, {
 
 app.use(cors({ origin: (origin, cb) => cb(null, true), credentials: false, methods: ['GET','POST','PUT','DELETE','OPTIONS'], allowedHeaders: ['Content-Type','Authorization','Range'] }));
 app.options('*', cors({ origin: (origin, cb) => cb(null, true) }));
+// Security hardening and sensible defaults; relax some policies for media/proxy flows
+app.use(helmet({
+  contentSecurityPolicy: false,
+  crossOriginOpenerPolicy: { policy: 'same-origin-allow-popups' },
+  crossOriginResourcePolicy: { policy: 'cross-origin' },
+}));
+app.use(compression());
 app.use(express.json());
 
 // In-memory storage

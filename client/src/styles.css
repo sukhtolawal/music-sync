@@ -29,7 +29,7 @@ body {
 .container {
   max-width: 1080px;
   margin: 0 auto;
-  padding: 28px 24px 96px;
+  padding: 28px 24px calc(96px + env(safe-area-inset-bottom, 0px));
 }
 
 .header {
@@ -145,11 +145,13 @@ body {
 .brandMini { font-size: 12px; color: var(--muted); }
 
 /* Floating chat button */
-.chatFab { position: fixed; right: 16px; bottom: 96px; width: 56px; height: 56px; border-radius: 999px; background: var(--primary); color: #fff; display: grid; place-items: center; box-shadow: var(--shadow); border: 1px solid rgba(148,163,184,.18); cursor: pointer; z-index: 120; transition: transform .06s ease, filter .2s ease; }
-.chatFab:hover { filter: brightness(1.07); }
+.fabGroup { position: fixed; right: 16px; bottom: calc(96px + env(safe-area-inset-bottom, 0px)); display: grid; gap: 10px; z-index: 120; }
+.fabLeftGroup { position: fixed; left: 16px; bottom: calc(96px + env(safe-area-inset-bottom, 0px)); display: grid; gap: 10px; z-index: 120; }
+.fabBtn { width: 56px; height: 56px; border-radius: 999px; background: rgba(10,16,32,.8); color: #fff; display: grid; place-items: center; box-shadow: var(--shadow); border: 1px solid rgba(148,163,184,.18); cursor: pointer; transition: transform .06s ease, filter .2s ease; }
+.fabBtn:hover { filter: brightness(1.07); }
 
 /* Chat panel */
-.chatPanel { position: fixed; right: 16px; bottom: 168px; width: min(380px, 92vw); max-height: 60vh; display: grid; grid-template-rows: auto 1fr auto; background: var(--panel-strong); border: 1px solid rgba(148,163,184,.18); border-radius: 12px; box-shadow: var(--shadow); overflow: hidden; z-index: 130; backdrop-filter: blur(8px) saturate(130%); }
+.chatPanel { position: fixed; right: 16px; bottom: calc(168px + env(safe-area-inset-bottom, 0px)); width: min(380px, 92vw); max-height: 60vh; display: grid; grid-template-rows: auto 1fr auto; background: var(--panel-strong); border: 1px solid rgba(148,163,184,.18); border-radius: 12px; box-shadow: var(--shadow); overflow: hidden; z-index: 130; backdrop-filter: blur(8px) saturate(130%); }
 .chatHeader { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border-bottom: 1px solid rgba(148,163,184,.18); }
   .chatTitle { font-weight: 600; }
   .chatList { padding: 12px; overflow: auto; display: grid; gap: 8px; scrollbar-width: none; -ms-overflow-style: none; }
@@ -173,10 +175,28 @@ body {
 .drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(360px, 92vw); background: var(--panel-strong); border-left: 1px solid rgba(148,163,184,.18); box-shadow: var(--shadow); z-index: 150; overflow: auto; backdrop-filter: blur(8px) saturate(130%); padding: 16px; }
 
 .mobileOnly { display: none; }
-@media (max-width: 640px) { .mobileOnly { display: inline-flex; } .sidebar { display: none; } .drawer .sidebar { display: block; } }
+@media (max-width: 640px) { .sidebar { display: none; } .drawer .sidebar { display: block; } }
+
+/* Prefer capability-based detection for touch devices */
+@media (hover: none) and (pointer: coarse) {
+  .mobileOnly { display: inline-flex !important; }
+  .desktopOnly { display: none !important; }
+}
 
 .desktopOnly { display: inline; }
-@media (max-width: 640px) { .desktopOnly { display: none; } }
+@media (max-width: 640px) { .desktopOnly { display: inline; } }
+
+/* Show mobile-only UI based on device capability (phones/tablets), not window width */
+@media (hover: none) and (pointer: coarse) {
+  .mobileOnly { display: inline-flex !important; }
+  .desktopOnly { display: none !important; }
+}
+
+/* Also switch based on device capabilities (better for tablets/large phones) */
+@media (hover: none) and (pointer: coarse) {
+  .mobileOnly { display: inline-flex !important; }
+  .desktopOnly { display: none !important; }
+}
 
 .trackBadge { display: grid; place-items: center; pointer-events: none; }
 .trackBadgeText { max-width: 92vw; background: rgba(10,16,32,.9); border: 1px solid rgba(148,163,184,.24); color: var(--text); padding: 6px 10px; border-radius: 10px; font-size: 13px; text-align: center; box-shadow: var(--shadow); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -185,8 +205,8 @@ body {
 
 @media (max-width: 900px) {
   .playerBar { grid-template-columns: 1fr 1.5fr 1fr; height: 84px; }
-  .chatFab { right: 12px; bottom: 96px; }
-  .chatPanel { right: 12px; bottom: 168px; width: min(96vw, 420px); }
+.chatFab { right: 12px; bottom: calc(96px + env(safe-area-inset-bottom, 0px)); }
+.chatPanel { right: 12px; bottom: calc(168px + env(safe-area-inset-bottom, 0px)); width: min(96vw, 420px); }
 }
 
 @media (max-width: 640px) {
@@ -211,11 +231,11 @@ body {
 
   /* Chat panel: wider and taller on phones */
   .chatPanel { right: 8px; left: 8px; width: auto; bottom: calc(112px + env(safe-area-inset-bottom, 0px)); max-height: 65vh; }
-  .chatFab { right: 12px; bottom: 96px; width: 56px; height: 56px; }
+  .chatFab { right: 12px; bottom: calc(96px + env(safe-area-inset-bottom, 0px)); width: 56px; height: 56px; }
   .chatBadge { top: -6px; right: -6px; }
 
   /* Songs modal as bottom sheet */
-  .songsCard { position: fixed; left: 0; right: 0; bottom: calc(88px + env(safe-area-inset-bottom, 0px)); width: 100vw !important; max-height: 72vh !important; border-radius: 16px 16px 0 0; }
+.songsCard { position: fixed; left: 0; right: 0; bottom: calc(88px + env(safe-area-inset-bottom, 0px)); width: 100vw !important; max-height: 72vh !important; border-radius: 16px 16px 0 0; z-index: 140; }
   .songsCard .row { flex-wrap: nowrap; }
   .songsCard .row .input { width: 60%; }
   .songsCard .row .button { width: auto; }
@@ -236,12 +256,25 @@ body {
 .chatClose:hover { background: rgba(148,163,184,.12); color: var(--text); }
 .chatClose:active { transform: translateY(1px); }
 
-.queuePanel { position: fixed; right: 84px; bottom: 168px; width: min(380px, 92vw); max-height: 60vh; display: grid; grid-template-rows: auto 1fr; background: var(--panel-strong); border: 1px solid rgba(148,163,184,.18); border-radius: 12px; box-shadow: var(--shadow); overflow: auto; z-index: 130; backdrop-filter: blur(8px) saturate(130%); padding-bottom: 8px; }
+.queuePanel { position: fixed; right: 84px; bottom: calc(168px + env(safe-area-inset-bottom, 0px)); width: min(380px, 92vw); max-height: 60vh; display: grid; grid-template-rows: auto 1fr; background: var(--panel-strong); border: 1px solid rgba(148,163,184,.18); border-radius: 12px; box-shadow: var(--shadow); overflow: auto; z-index: 130; backdrop-filter: blur(8px) saturate(130%); padding-bottom: 8px; }
 .queueHeader { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border-bottom: 1px solid rgba(148,163,184,.18); }
 .queueTitle { font-weight: 600; }
 .queueList { padding: 12px; display: grid; gap: 8px; }
 
-.queueFab { position: fixed; right: 84px; bottom: 96px; width: 56px; height: 56px; border-radius: 999px; background: rgba(148,163,184,.12); color: var(--text); display: grid; place-items: center; box-shadow: var(--shadow); border: 1px solid rgba(148,163,184,.18); cursor: pointer; z-index: 120; transition: transform .06s ease, filter .2s ease; }
-.queueFab:hover { filter: brightness(1.07); }
+.queueFab { display: none; }
 
 @media (max-width: 640px) { .queuePanel { right: 84px; left: 8px; bottom: calc(112px + env(safe-area-inset-bottom, 0px)); } }
+
+/* Mobile bottom navigation */
+.mobileNav { position: fixed; left: 0; right: 0; bottom: 78px; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 10px 12px; z-index: 160; }
+@media (max-width: 640px) { .mobileNav { bottom: calc(88px + env(safe-area-inset-bottom, 0px)); } }
+.mobileNavBtn { position: relative; display: grid; place-items: center; gap: 4px; background: rgba(148,163,184,.12); color: var(--text); border: 1px solid rgba(148,163,184,.18); border-radius: 12px; padding: 10px 12px; }
+.mobileNavLabel { font-size: 12px; color: var(--muted); }
+.mobileNavBadge { position: absolute; top: 6px; right: 8px; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px; background: #ef4444; color: #fff; font-size: 11px; display: inline-grid; place-items: center; border: 2px solid rgba(11,17,30,0.98); }
+
+/* Force desktop behavior on wide screens even if device reports touch */
+@media (min-width: 800px) {
+  .mobileOnly { display: none !important; }
+  .mobileNav { display: none !important; }
+  .desktopOnly { display: inline !important; }
+}
