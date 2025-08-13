@@ -4,8 +4,14 @@ import { io, Socket } from 'socket.io-client'
 import { useTimeSync } from './lib/useTimeSync'
 import { useRoomPresence } from './hooks/useRoomPresence'
 import { ParticipantsSidebar } from './components/ParticipantsSidebar'
+import { PlayerBar } from './components/PlayerBar'
+import { ChatWidget } from './components/ChatWidget'
+import { FaComments } from 'react-icons/fa'
 
-const SERVER_URL = `${window.location.protocol}//${window.location.hostname}:4000`
+const DEFAULT_SERVER = `${window.location.protocol}//${window.location.hostname}:4000`
+const SERVER_URL = (import.meta as any).env?.VITE_SERVER_URL || DEFAULT_SERVER
+
+type QueueItem = { id: string; url: string; name: string; addedBy: string; addedAt: number }
 
 type View = 'lobby' | 'room'
 
@@ -50,6 +56,10 @@ export default function App() {
   const [songsOpen, setSongsOpen] = useState(false);
   const [songs, setSongs] = useState<{ name: string; url: string }[]>([]);
   const [songQuery, setSongQuery] = useState('');
+  // Chat
+  const [chatOpen, setChatOpen] = useState(false)
+  // Queue
+  const [queue, setQueue] = useState<QueueItem[]>([])
   const visibleSongs = useMemo(() => {
     const q = songQuery.trim().toLowerCase()
     if (!q) return songs
@@ -145,6 +155,12 @@ export default function App() {
     }
     socket.on('state:update', onStateUpdate)
 
+    // Queue updates
+    const onQueue = (items: QueueItem[]) => {
+      if (Array.isArray(items)) setQueue(items)
+    }
+    socket.on('queue:update', onQueue)
+
     // room presence handled by useRoomPresence
 
     const onDenied = ({ reason }: any) => {
@@ -192,6 +208,7 @@ export default function App() {
     return () => {
       socket.off('state:init', onInit)
       socket.off('state:update', onStateUpdate)
+      socket.off('queue:update', onQueue)
       // handled by presence hook
       socket.off('control:denied', onDenied)
       socket.off('play', onPlay)
@@ -200,6 +217,15 @@ export default function App() {
       // handled by presence hook
     }
   }, [socket, offsetMs])
+
+  // Fetch queue when entering a room
+  useEffect(() => {
+    if (!connected || !nameSet) return
+    if (!roomId) return
+    socket.emit('queue:get', roomId, (items: QueueItem[]) => {
+      if (Array.isArray(items)) setQueue(items)
+    })
+  }, [connected, nameSet, roomId, socket])
 
   // Auto set name from saved username after connect
   useEffect(() => {
@@ -279,15 +305,22 @@ export default function App() {
         if (buf && buf.length > 0) setBufferedSec(buf.end(buf.length - 1))
       } catch {}
     }
+    const onEnded = () => {
+      if (roomId && canControl) {
+        socket.emit('playback:ended', { roomId })
+      }
+    }
 
     audio.addEventListener('loadedmetadata', onLoaded)
     audio.addEventListener('timeupdate', onTime)
     audio.addEventListener('progress', onProgress)
+    audio.addEventListener('ended', onEnded)
 
     return () => {
       audio.removeEventListener('loadedmetadata', onLoaded)
       audio.removeEventListener('timeupdate', onTime)
       audio.removeEventListener('progress', onProgress)
+      audio.removeEventListener('ended', onEnded)
     }
   }, [trackUrl])
 
@@ -526,8 +559,29 @@ export default function App() {
     setTrackUrl(absolute)
     await primeAudio()
     socket.emit('control:load', { roomId, trackUrl: absolute })
+    socket.emit('control:play', { roomId })
     setSongsOpen(false)
   }
+  const queueSong = async (songUrl: string, name: string) => {
+    if (!roomId) return
+    const url = songUrl.startsWith('http') ? songUrl : `${SERVER_URL}${songUrl}`
+    socket.emit('queue:add', { roomId, url, name }, (resp: any) => {
+      if (!resp?.ok) setAudioError(resp?.reason || 'Failed to queue song')
+    })
+  }
+  const playQueueItemNow = (id: string) => {
+    if (!roomId) return
+    socket.emit('queue:playNow', { roomId, id }, (resp: any) => {
+      if (!resp?.ok) setAudioError(resp?.reason || 'Failed to play item')
+    })
+  }
+  const removeQueueItem = (id: string) => {
+    if (!roomId) return
+    socket.emit('queue:remove', { roomId, id }, (resp: any) => {
+      if (!resp?.ok) setAudioError(resp?.reason || 'Failed to remove item')
+    })
+  }
+
   const play = async () => { await primeAudio(); roomId && socket.emit('control:play', { roomId }) }
   const pause = () => { roomId && socket.emit('control:pause', { roomId }) }
   const seekBy = async (deltaSec: number) => { await primeAudio(); const newPos = Math.max(0, (audioRef.current?.currentTime ?? 0) + deltaSec); roomId && socket.emit('control:seek', { roomId, positionSec: newPos }) }
@@ -628,6 +682,7 @@ export default function App() {
 
           {audioError && <div className="error">{audioError}</div>}
         </div>
+        {/* Floating Chat Button hidden in lobby */}
       </div>
     )
   }
@@ -658,37 +713,29 @@ export default function App() {
             </button>
           </div>
 
-          <div className="player section">
-            <button className="iconBtn" onClick={() => canControl && seekBy(-5)} disabled={!canControl} title="Back 5s" aria-label="Back 5 seconds">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M11 19A7 7 0 1 1 18 12" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/><path d="M12 5V2l-3 3 3 3V5z" fill="currentColor"/></svg>
-            </button>
-            <button className={`iconBtn ${canControl ? 'primary' : ''}`} onClick={() => (isPlaying ? pause() : play())} disabled={!canControl} aria-label={isPlaying? 'Pause':'Play'}>
-              {isPlaying ? (
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
-              ) : (
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><path d="M7 5l12 7-12 7V5z"/></svg>
-              )}
-            </button>
-            <button className="iconBtn" onClick={() => canControl && seekBy(5)} disabled={!canControl} title="Forward 5s" aria-label="Forward 5 seconds">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M13 5a7 7 0 1 1-7 7" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/><path d="M12 5V2l3 3-3 3V5z" fill="currentColor"/></svg>
-            </button>
-
-            <div className="progress"
-              onPointerDown={handleProgressDown}
-              onPointerMove={handleProgressMove}
-              onPointerUp={handleProgressUp}
-              onPointerCancel={handleProgressUp}
-            >
-              <div className="progressBar">
-                <div className="progressBuffered" style={{ width: `${Math.min(100, bufferedPct)}%` }} />
-                <div className="progressFill" style={{ width: `${Math.min(100, progressPct)}%` }} />
-                <div className="progressKnob" style={{ left: `${Math.min(100, progressPct)}%` }} />
+          {/* Queue Panel */}
+          <div className="section">
+            <h3 style={{ marginTop: 0 }}>Queue</h3>
+            {queue.length === 0 ? (
+              <p className="helper" style={{ margin: 0 }}>Queue is empty</p>
+            ) : (
+              <div style={{ display: 'grid', gap: 8 }}>
+                {queue.map((item) => (
+                  <div key={item.id} className="row" style={{ justifyContent: 'space-between' }}>
+                    <div style={{ display: 'grid' }}>
+                      <span>{item.name}</span>
+                      <span className="helper">added by {item.addedBy}</span>
+                    </div>
+                    {canControl && (
+                      <div className="row">
+                        <button className="button" onClick={() => playQueueItemNow(item.id)}>Play now</button>
+                        <button className="button secondary" onClick={() => removeQueueItem(item.id)}>Remove</button>
+                      </div>
+                    )}
+                  </div>
+                ))}
               </div>
-              <div className="timeRow">
-                <span>{fmt(previewSec ?? currentSec)}</span>
-                <span>{fmt(durationSec || 0)}</span>
-              </div>
-            </div>
+            )}
           </div>
 
           {audioError && (
@@ -716,11 +763,25 @@ export default function App() {
             if (!roomId) return
             socket.emit('room:transferOwner', { roomId, newOwnerName: target }, (resp: any) => {
               if (!resp?.ok) setAudioError(resp?.reason || 'Failed to transfer ownership')
-              else try { window.location.reload() } catch {}
             })
           }}
         />
       </div>
+
+      {/* Floating Chat Button */}
+      <button className="chatFab" onClick={() => setChatOpen(true)} aria-label="Open chat">
+        <FaComments size={22} />
+      </button>
+
+      {/* Chat Panel */}
+      <ChatWidget
+        socket={socket}
+        roomId={roomId}
+        username={username}
+        open={chatOpen}
+        onClose={() => setChatOpen(false)}
+      />
+
       {songsOpen && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.5)', display: 'grid', placeItems: 'center', zIndex: 50 }} onClick={() => setSongsOpen(false)}>
           <div className="card" style={{ width: 'min(720px, 96vw)', maxHeight: '80vh', overflow: 'auto' }} onClick={e => e.stopPropagation()}>
@@ -747,7 +808,10 @@ export default function App() {
                   visibleSongs.map((s) => (
                     <div key={s.url} className="row" style={{ justifyContent: 'space-between' }}>
                       <span>{s.name}</span>
-                      <button className="button" onClick={() => selectSong(s.url)} disabled={!canControl}>Play</button>
+                      <div className="row">
+                        <button className="button" onClick={() => selectSong(s.url)} disabled={!canControl}>Play</button>
+                        <button className="button secondary" onClick={() => queueSong(s.url, s.name)} disabled={!canControl}>Queue</button>
+                      </div>
                     </div>
                   ))
                 )}
@@ -756,6 +820,19 @@ export default function App() {
           </div>
         </div>
       )}
+
+      <PlayerBar
+        isPlaying={isPlaying}
+        canControl={canControl}
+        currentSec={previewSec ?? currentSec}
+        durationSec={durationSec}
+        bufferedSec={bufferedSec}
+        onPlay={play}
+        onPause={pause}
+        onSeekBy={(d) => seekBy(d)}
+        onSeekTo={(sec) => canControl && socket.emit('control:seek', { roomId, positionSec: Math.max(0, Math.min(durationSec || 0, sec)) })}
+        fmt={fmt}
+      />
     </div>
   )
 }

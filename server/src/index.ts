@@ -6,6 +6,7 @@ import multer, { diskStorage } from 'multer';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join, extname } from 'path';
+import { Readable } from 'stream';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -24,7 +25,7 @@ const io = new Server(server, {
   }
 });
 
-app.use(cors({ origin: (origin, cb) => cb(null, true), credentials: false, methods: ['GET','POST','PUT','DELETE','OPTIONS'], allowedHeaders: ['Content-Type','Authorization'] }));
+app.use(cors({ origin: (origin, cb) => cb(null, true), credentials: false, methods: ['GET','POST','PUT','DELETE','OPTIONS'], allowedHeaders: ['Content-Type','Authorization','Range'] }));
 app.options('*', cors({ origin: (origin, cb) => cb(null, true) }));
 app.use(express.json());
 
@@ -40,14 +41,64 @@ const playbackStates = new Map<string, {
   lastUpdate: number;
 }>();
 
+// Per-room chat history (in-memory)
+const chatHistory = new Map<string, Array<{ id: string; user: string; text: string; timeMs: number }>>();
+
+// Per-room playback queue (in-memory)
+export type QueueItem = { id: string; url: string; name: string; addedBy: string; addedAt: number }
+const queues = new Map<string, QueueItem[]>();
+
+function getQueue(roomId: string): QueueItem[] {
+  const q = queues.get(roomId)
+  if (!q) { const arr: QueueItem[] = []; queues.set(roomId, arr); return arr }
+  return q
+}
+function broadcastQueue(roomId: string) {
+  const items = getQueue(roomId)
+  io.to(roomId).emit('queue:update', items)
+}
+
+function schedulePlayForRoom(roomId: string) {
+  const state = playbackStates.get(roomId)
+  if (!state) return
+  const startDelayMs = 1500
+  const plannedStartAtMs = Date.now() + startDelayMs
+  state.isPlaying = true
+  state.startTime = plannedStartAtMs
+  state.lastUpdate = Date.now()
+  io.to(roomId).emit('play', {
+    trackUrl: state.trackUrl,
+    positionSec: state.positionSec,
+    startAtServerMs: plannedStartAtMs
+  })
+  io.to(roomId).emit('room:state', buildRoomState(roomId))
+}
+
+// Resolve media roots; prefer repo-level folders when running from packages/server
+const repoRoot = join(process.cwd(), '..');
+const candidateUploads = [join(repoRoot, 'uploads'), join(process.cwd(), 'uploads')];
+const candidateSongs = [join(repoRoot, 'songs'), join(process.cwd(), 'songs')];
+
+function ensureFirstExistingPath(candidates: string[]): string {
+  for (const p of candidates) {
+    try {
+      if (fs.existsSync(p)) return p;
+    } catch {}
+  }
+  // default to first and create it
+  const first = candidates[0];
+  try { fs.mkdirSync(first, { recursive: true }); } catch {}
+  return first;
+}
+
 // Local uploads storage
-const uploadRoot = join(process.cwd(), 'uploads');
+const uploadRoot = ensureFirstExistingPath(candidateUploads);
 if (!fs.existsSync(uploadRoot)) {
   fs.mkdirSync(uploadRoot, { recursive: true });
 }
 
 // Local songs library storage
-const songsRoot = join(process.cwd(), 'songs');
+const songsRoot = ensureFirstExistingPath(candidateSongs);
 if (!fs.existsSync(songsRoot)) {
   fs.mkdirSync(songsRoot, { recursive: true });
 }
@@ -60,7 +111,25 @@ const storage = diskStorage({
     cb(null, unique);
   }
 });
-const upload = multer({ storage, limits: { fileSize: 200 * 1024 * 1024 } });
+
+const allowedAudioMimes = new Set([
+  'audio/mpeg', // mp3
+  'audio/mp4',
+  'audio/aac',
+  'audio/wav',
+  'audio/x-wav',
+  'audio/ogg',
+  'audio/flac',
+  'audio/webm'
+]);
+const upload = multer({
+  storage,
+  limits: { fileSize: 200 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    if (allowedAudioMimes.has(file.mimetype)) return cb(null, true)
+    return cb(new Error('Unsupported file type'))
+  }
+});
 
 app.use('/media', express.static(uploadRoot, {
   setHeaders: (res) => {
@@ -106,11 +175,24 @@ app.post('/upload', upload.single('file'), (req, res) => {
     }
     const urlPath = `/media/${file.filename}`;
     res.json({ ok: true, url: urlPath, filename: file.originalname });
-  } catch (e) {
+  } catch (e: any) {
     console.error('Upload error:', e);
-    res.status(500).json({ ok: false, reason: 'Upload failed' });
+    const msg = typeof e?.message === 'string' ? e.message : 'Upload failed'
+    res.status(400).json({ ok: false, reason: msg });
   }
 });
+
+// Format Multer errors
+app.use((err: any, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (!err) return next()
+  if (err?.code === 'LIMIT_FILE_SIZE') {
+    return res.status(413).json({ ok: false, reason: 'File too large' })
+  }
+  if (typeof err?.message === 'string') {
+    return res.status(400).json({ ok: false, reason: err.message })
+  }
+  next(err)
+})
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -147,6 +229,7 @@ app.get('/proxy', async (req, res) => {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
       'Access-Control-Allow-Headers': 'Range',
+      'Access-Control-Expose-Headers': 'Accept-Ranges, Content-Length, Content-Range, Content-Type',
       'Cross-Origin-Resource-Policy': 'cross-origin',
       'Accept-Ranges': acceptRanges,
       'Cache-Control': 'public, max-age=3600',
@@ -156,17 +239,19 @@ app.get('/proxy', async (req, res) => {
     if (contentRange) res.setHeader('Content-Range', contentRange);
 
     if (response.body) {
-      response.body.pipeTo(new WritableStream({
-        write(chunk) {
-          res.write(chunk);
-        },
-        close() {
-          res.end();
-        }
-      })).catch(error => {
-        console.error('Streaming error:', error);
-        res.end();
-      });
+      try {
+        const nodeStream = Readable.fromWeb(response.body as any);
+        nodeStream.on('error', (error) => {
+          console.error('Streaming error:', error);
+          try { res.end(); } catch {}
+        });
+        nodeStream.pipe(res);
+      } catch (err) {
+        console.error('Stream conversion error:', err);
+        // Fallback: read fully (not ideal for large files)
+        const buffer = Buffer.from(await response.arrayBuffer());
+        res.end(buffer);
+      }
     } else {
       res.end();
     }
@@ -373,6 +458,125 @@ io.on('connection', (socket) => {
     console.log('Track loaded in room:', roomId, 'by:', currentUser);
   });
 
+  // Queue: add item
+  socket.on('queue:add', (data: { roomId: string; url: string; name?: string }, callback?: (r: any) => void) => {
+    try {
+      const { roomId, url } = data || ({} as any)
+      let { name } = data || ({} as any)
+      if (!roomId || typeof url !== 'string' || !url.trim()) { callback?.({ ok: false, reason: 'Invalid payload' }); return }
+      const room = rooms.get(roomId)
+      if (!room) { callback?.({ ok: false, reason: 'Room not found' }); return }
+      if (room.ownerId !== currentUser) { callback?.({ ok: false, reason: 'Only owner can add to queue' }); return }
+      name = typeof name === 'string' && name.trim() ? name.trim().slice(0, 200) : url
+      const q = getQueue(roomId)
+      // dedupe: avoid back-to-back duplicate adds of same track by same user within 2s
+      const now = Date.now()
+      const last = q[q.length - 1]
+      if (last && last.url === url.trim() && last.addedBy === currentUser && now - last.addedAt < 2000) {
+        callback?.({ ok: true, item: last })
+        return
+      }
+      const item: QueueItem = { id: `${now}-${Math.random().toString(36).slice(2, 8)}`, url: url.trim(), name, addedBy: currentUser!, addedAt: now }
+      q.push(item)
+      queues.set(roomId, q)
+      broadcastQueue(roomId)
+      console.log('Queue add:', { roomId, item: { id: item.id, name: item.name } })
+      callback?.({ ok: true, item })
+    } catch (e) {
+      console.error('queue:add error', e)
+      callback?.({ ok: false, reason: 'Queue add failed' })
+    }
+  })
+
+  // Queue: remove item
+  socket.on('queue:remove', (data: { roomId: string; id: string }, callback?: (r: any) => void) => {
+    try {
+      const { roomId, id } = data || ({} as any)
+      if (!roomId || !id) { callback?.({ ok: false, reason: 'Invalid payload' }); return }
+      const room = rooms.get(roomId)
+      if (!room) { callback?.({ ok: false, reason: 'Room not found' }); return }
+      if (room.ownerId !== currentUser) { callback?.({ ok: false, reason: 'Only owner can remove from queue' }); return }
+      const q = getQueue(roomId)
+      const next = q.filter(x => x.id !== id)
+      queues.set(roomId, next)
+      broadcastQueue(roomId)
+      callback?.({ ok: true })
+    } catch (e) {
+      console.error('queue:remove error', e)
+      callback?.({ ok: false, reason: 'Queue remove failed' })
+    }
+  })
+
+  // Queue: play item now
+  socket.on('queue:playNow', (data: { roomId: string; id: string }, callback?: (r: any) => void) => {
+    try {
+      const { roomId, id } = data || ({} as any)
+      if (!roomId || !id) { callback?.({ ok: false, reason: 'Invalid payload' }); return }
+      const room = rooms.get(roomId)
+      if (!room) { callback?.({ ok: false, reason: 'Room not found' }); return }
+      if (room.ownerId !== currentUser) { callback?.({ ok: false, reason: 'Only owner can play now' }); return }
+      const q = getQueue(roomId)
+      const idx = q.findIndex(x => x.id === id)
+      if (idx === -1) { callback?.({ ok: false, reason: 'Item not found' }); return }
+      const [item] = q.splice(idx, 1)
+      // Load this track immediately
+      playbackStates.set(roomId, {
+        isPlaying: false,
+        positionSec: 0,
+        trackUrl: item.url,
+        startTime: Date.now(),
+        lastUpdate: Date.now()
+      })
+      io.to(roomId).emit('state:update', { trackUrl: item.url, isPlaying: false, positionSec: 0, serverNowMs: Date.now() })
+      // Put remaining queue back and broadcast
+      queues.set(roomId, q)
+      broadcastQueue(roomId)
+      // Auto play after small delay to sync
+      schedulePlayForRoom(roomId)
+      callback?.({ ok: true })
+    } catch (e) {
+      console.error('queue:playNow error', e)
+      callback?.({ ok: false, reason: 'Play now failed' })
+    }
+  })
+
+  // Queue: get
+  socket.on('queue:get', (roomId: string, callback?: (items: QueueItem[]) => void) => {
+    try {
+      const r = typeof roomId === 'string' ? roomId : currentRoom
+      if (!r) { callback?.([]); return }
+      callback?.(getQueue(r))
+    } catch { callback?.([]) }
+  })
+
+  // Playback ended (owner can trigger auto-advance)
+  socket.on('playback:ended', (data: { roomId: string }) => {
+    try {
+      const { roomId } = data || ({} as any)
+      if (!roomId) return
+      const room = rooms.get(roomId)
+      if (!room) return
+      if (room.ownerId !== currentUser) return
+      const q = getQueue(roomId)
+      if (q.length === 0) return
+      const next = q.shift()!
+      // Load next track
+      playbackStates.set(roomId, {
+        isPlaying: false,
+        positionSec: 0,
+        trackUrl: next.url,
+        startTime: Date.now(),
+        lastUpdate: Date.now()
+      })
+      io.to(roomId).emit('state:update', { trackUrl: next.url, isPlaying: false, positionSec: 0, serverNowMs: Date.now() })
+      queues.set(roomId, q)
+      broadcastQueue(roomId)
+      schedulePlayForRoom(roomId)
+    } catch (e) {
+      console.error('playback:ended error', e)
+    }
+  })
+
   // Play control
   socket.on('control:play', (data: { roomId: string }) => {
     const { roomId } = data;
@@ -544,6 +748,46 @@ io.on('connection', (socket) => {
       trackUrl: state.trackUrl
     });
   });
+
+  // Chat: send message to room
+  socket.on('chat:send', (data: { roomId: string; text: string }) => {
+    try {
+      const { roomId, text } = data || ({} as any)
+      const clean = typeof text === 'string' ? text.trim() : ''
+      if (!roomId || !clean) return
+      if (!currentUser) return
+      const room = rooms.get(roomId)
+      if (!room) return
+      if (!room.participants.includes(currentUser) && room.ownerId !== currentUser) return
+      const msg = {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        user: currentUser,
+        text: clean.slice(0, 1000),
+        timeMs: Date.now(),
+      }
+      const arr = chatHistory.get(roomId) || []
+      arr.push(msg)
+      while (arr.length > 200) arr.shift()
+      chatHistory.set(roomId, arr)
+      io.to(roomId).emit('chat:new', msg)
+    } catch (e) {
+      console.error('chat:send error', e)
+    }
+  })
+
+  // Chat: get recent history
+  socket.on('chat:get', (roomId: string, callback?: (messages: Array<{ id: string; user: string; text: string; timeMs: number }>) => void) => {
+    try {
+      const r = typeof roomId === 'string' ? roomId : currentRoom
+      if (!r) { callback?.([]); return }
+      const room = rooms.get(r)
+      if (!room) { callback?.([]); return }
+      if (!currentUser || (!room.participants.includes(currentUser) && room.ownerId !== currentUser)) { callback?.([]); return }
+      callback?.(chatHistory.get(r) || [])
+    } catch {
+      callback?.([])
+    }
+  })
 
   // Disconnect handling
   socket.on('disconnect', () => {
