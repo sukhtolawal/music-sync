@@ -1,5 +1,4 @@
 import { FaPlay, FaPause, FaStepBackward, FaStepForward } from 'react-icons/fa'
-import type React from 'react'
 
 type Props = {
   isPlaying: boolean
@@ -12,6 +11,7 @@ type Props = {
   onSeekBy: (delta: number) => void
   onSeekTo: (sec: number) => void
   fmt: (s: number) => string
+  trackName?: string
 }
 
 export function PlayerBar({ isPlaying, canControl, currentSec, durationSec, bufferedSec, onPlay, onPause, onSeekBy, onSeekTo, fmt }: Props) {
@@ -20,12 +20,7 @@ export function PlayerBar({ isPlaying, canControl, currentSec, durationSec, buff
 
   return (
     <div className="playerBar">
-      <div className="playerBarLeft">
-        <div className="trackMeta">
-          <div className="trackTitle">Now Playing</div>
-          <div className="trackArtist">Synchronized Audio</div>
-        </div>
-      </div>
+      <div className="playerBarLeft" />
 
       <div className="playerBarCenter">
         <div className="controls">
@@ -51,9 +46,7 @@ export function PlayerBar({ isPlaying, canControl, currentSec, durationSec, buff
         </div>
       </div>
 
-      <div className="playerBarRight">
-        <div className="brandMini">Music Sync</div>
-      </div>
+      <div className="playerBarRight" />
     </div>
   )
 } 

@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { Socket } from 'socket.io-client'
+import { gsap } from 'gsap'
 
 export type ChatMessage = { id: string; user: string; text: string; timeMs: number }
 
@@ -8,13 +9,27 @@ type Props = {
   roomId: string
   username: string
   open: boolean
-  onClose: () => void
+  onClose?: () => void
+  onNewMessage?: (msg: ChatMessage) => void
 }
 
-export function ChatWidget({ socket, roomId, username, open, onClose }: Props) {
+export function ChatWidget({ socket, roomId, username, open, onClose, onNewMessage }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [text, setText] = useState('')
   const listRef = useRef<HTMLDivElement | null>(null)
+  const panelRef = useRef<HTMLDivElement | null>(null)
+
+  useLayoutEffect(() => {
+    if (!open) return
+    const prefersReduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    if (prefersReduced) return
+    const ctx = gsap.context(() => {
+      if (!panelRef.current) return
+      gsap.set(panelRef.current, { y: 12, opacity: 0 })
+      gsap.to(panelRef.current, { y: 0, opacity: 1, duration: .28, ease: 'power3.out' })
+    }, panelRef)
+    return () => ctx.revert()
+  }, [open])
 
   // Load history on open
   useEffect(() => {
@@ -30,11 +45,12 @@ export function ChatWidget({ socket, roomId, username, open, onClose }: Props) {
     const onNew = (msg: ChatMessage) => {
       if (!msg || msg == null) return
       setMessages(prev => [...prev, msg])
+      try { onNewMessage?.(msg) } catch {}
       scrollToBottomSoon()
     }
     socket.on('chat:new', onNew)
     return () => { socket.off('chat:new', onNew) }
-  }, [socket])
+  }, [socket, onNewMessage])
 
   const scrollToBottom = () => {
     const el = listRef.current
@@ -59,10 +75,10 @@ export function ChatWidget({ socket, roomId, username, open, onClose }: Props) {
   if (!open) return null
 
   return (
-    <div className="chatPanel">
+    <div ref={panelRef} className="chatPanel">
       <div className="chatHeader">
         <div className="chatTitle">Room Chat</div>
-        <button className="chatClose" onClick={onClose} aria-label="Close chat">✕</button>
+        <button className="chatClose" onClick={() => onClose?.()} aria-label="Close chat">✕</button>
       </div>
       <div className="chatList" ref={listRef}>
         {messages.length === 0 && <div className="chatEmpty">No messages yet</div>}

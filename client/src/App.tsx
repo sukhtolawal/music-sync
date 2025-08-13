@@ -7,6 +7,9 @@ import { ParticipantsSidebar } from './components/ParticipantsSidebar'
 import { PlayerBar } from './components/PlayerBar'
 import { ChatWidget } from './components/ChatWidget'
 import { FaComments } from 'react-icons/fa'
+import { gsap } from 'gsap'
+import { ParticipantsDrawer } from './components/ParticipantsDrawer'
+import { QueueWidget } from './components/QueueWidget'
 
 const DEFAULT_SERVER = `${window.location.protocol}//${window.location.hostname}:4000`
 const SERVER_URL = (import.meta as any).env?.VITE_SERVER_URL || DEFAULT_SERVER
@@ -45,6 +48,7 @@ export default function App() {
 
   const [roomId, setRoomId] = useState<string>('');
   const [trackUrl, setTrackUrl] = useState<string>('');
+  const [trackName, setTrackName] = useState<string>('');
   const [creating, setCreating] = useState(false)
   const [joining, setJoining] = useState(false)
   const [isPlaying, setIsPlaying] = useState(false);
@@ -58,8 +62,15 @@ export default function App() {
   const [songQuery, setSongQuery] = useState('');
   // Chat
   const [chatOpen, setChatOpen] = useState(false)
+  const [unreadChat, setUnreadChat] = useState(0)
   // Queue
   const [queue, setQueue] = useState<QueueItem[]>([])
+  // Participants drawer (mobile)
+  const [drawerOpen, setDrawerOpen] = useState(false)
+  // Chat animation instance
+  const chatAnimRef = useRef<gsap.core.Tween | gsap.core.Timeline | null>(null)
+  // Queue floating panel
+  const [queueOpen, setQueueOpen] = useState(false)
   const visibleSongs = useMemo(() => {
     const q = songQuery.trim().toLowerCase()
     if (!q) return songs
@@ -93,6 +104,16 @@ export default function App() {
     } catch {}
   }, [])
 
+  useEffect(() => {
+    const prefersReduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    if (prefersReduced) return
+    const ctx = gsap.context(() => {
+      gsap.fromTo('.header', { y: -12, opacity: 0 }, { y: 0, opacity: 1, duration: .4, ease: 'power2.out', immediateRender: false })
+      gsap.fromTo('.card', { y: 12, opacity: 0 }, { y: 0, opacity: 1, duration: .5, ease: 'power2.out', stagger: .05, immediateRender: false })
+    })
+    return () => ctx.revert()
+  }, [])
+
   // Backend health heartbeat
   useEffect(() => {
     let stopped = false
@@ -115,6 +136,7 @@ export default function App() {
 
     const onInit = (state: any) => {
       if (state.trackUrl) setTrackUrl(state.trackUrl)
+      if (typeof state.trackName === 'string') setTrackName(state.trackName)
       if (state.isPlaying && typeof state.startTimeMs === 'number') {
         // Always ensure we are at least locally aligned immediately
         const serverNow = serverNowMs()
@@ -141,6 +163,7 @@ export default function App() {
 
     const onStateUpdate = (s: any) => {
       if (s.trackUrl) setTrackUrl(s.trackUrl)
+      if (typeof s.trackName === 'string') setTrackName(s.trackName)
       cancelDriftCorrection()
       const audio = audioRef.current
       if (audio) {
@@ -169,8 +192,9 @@ export default function App() {
     }
     socket.on('control:denied', onDenied)
 
-    const onPlay = ({ trackUrl, positionSec, startAtServerMs }: any) => {
+    const onPlay = ({ trackUrl, positionSec, startAtServerMs, trackName: tn }: any) => {
       if (trackUrl) setTrackUrl(trackUrl)
+      if (typeof tn === 'string') setTrackName(tn)
       schedulePlay(positionSec, startAtServerMs, { positionIsCurrent: false })
     }
     socket.on('play', onPlay)
@@ -546,6 +570,16 @@ export default function App() {
       if (data?.ok && Array.isArray(data.songs)) {
         setSongs(data.songs)
         setSongsOpen(true)
+        const prefersReduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+        if (!prefersReduced) {
+          requestAnimationFrame(() => {
+            const el = document.getElementById('songsCard')
+            if (el) {
+              gsap.set(el, { scale: .96, opacity: 0 })
+              gsap.to(el, { scale: 1, opacity: 1, duration: .26, ease: 'power3.out' })
+            }
+          })
+        }
       } else {
         setAudioError('Failed to load songs list')
       }
@@ -557,8 +591,9 @@ export default function App() {
     if (!roomId) return
     const absolute = songUrl.startsWith('http') ? songUrl : `${SERVER_URL}${songUrl}`
     setTrackUrl(absolute)
+    setTrackName(visibleSongs.find(s => s.url === songUrl || `${SERVER_URL}${s.url}` === absolute)?.name || '')
     await primeAudio()
-    socket.emit('control:load', { roomId, trackUrl: absolute })
+    socket.emit('control:load', { roomId, trackUrl: absolute, trackName })
     socket.emit('control:play', { roomId })
     setSongsOpen(false)
   }
@@ -637,7 +672,7 @@ export default function App() {
     return (
       <div className="container">
         <div className="header">
-          <div className="brand">Music Sync</div>
+          <div className="brand">sukh ❤️ simer</div>
           <div className={`badge ${overallOnline? 'ok':'err'}`}>{overallOnline? 'online':'offline'}</div>
         </div>
         {(!apiOnline || !connected) && (
@@ -690,7 +725,9 @@ export default function App() {
   return (
     <div className="container">
       <div className="header">
-        <div className="brand">Music Sync</div>
+        <div className="brand">sukh ❤️ simer</div>
+        <button className="button secondary mobileOnly" onClick={() => setDrawerOpen(true)}>Group</button>
+        {trackName && <div className="helper desktopOnly">Now playing: <b>{trackName}</b></div>}
         <div className={`badge ${overallOnline? 'ok':'err'}`}>{overallOnline? 'online':'offline'}</div>
       </div>
       {(!apiOnline || !connected) && (
@@ -700,12 +737,6 @@ export default function App() {
       <div className="layout">
         <div className="card" style={{ flex: 1 }}>
           <h2 style={{ marginTop: 0 }}>Room {roomId}</h2>
-          <div className="row">
-            <span className="helper">User: {username}</span>
-            <span className="helper">Owner: {ownerName ?? 'none'}</span>
-            <span className="helper">offset: {offsetMs} ms</span>
-            <span className="helper">rtt: {rttMs ?? '-'} ms</span>
-          </div>
 
           <div className="row" style={{ marginTop: 12 }}>
             <button className="button" onClick={openSongs} disabled={!canControl} title={canControl?undefined:'Only owner can pick songs'}>
@@ -713,46 +744,7 @@ export default function App() {
             </button>
           </div>
 
-          {/* Queue Panel */}
-          <div className="section">
-            <h3 style={{ marginTop: 0 }}>Queue</h3>
-            {queue.length === 0 ? (
-              <p className="helper" style={{ margin: 0 }}>Queue is empty</p>
-            ) : (
-              <div style={{ display: 'grid', gap: 8 }}>
-                {queue.map((item) => (
-                  <div key={item.id} className="row" style={{ justifyContent: 'space-between' }}>
-                    <div style={{ display: 'grid' }}>
-                      <span>{item.name}</span>
-                      <span className="helper">added by {item.addedBy}</span>
-                    </div>
-                    {canControl && (
-                      <div className="row">
-                        <button className="button" onClick={() => playQueueItemNow(item.id)}>Play now</button>
-                        <button className="button secondary" onClick={() => removeQueueItem(item.id)}>Remove</button>
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-
-          {audioError && (
-            <div className="error">{audioError}</div>
-          )}
-
-          <audio
-            ref={audioRef}
-            src={resolveSrc(trackUrl) || undefined}
-            preload="auto"
-            playsInline
-            className="audio"
-          />
-
-          <p className="helper" style={{ marginTop: 12 }}>
-            Only the room owner can control playback.
-          </p>
+          
         </div>
 
         <ParticipantsSidebar
@@ -768,10 +760,35 @@ export default function App() {
         />
       </div>
 
+      <ParticipantsDrawer
+        open={drawerOpen}
+        onClose={() => setDrawerOpen(false)}
+        username={username}
+        ownerName={ownerName}
+        participants={participants}
+        onMakeAdmin={(target) => {
+          if (!roomId) return
+          socket.emit('room:transferOwner', { roomId, newOwnerName: target }, (resp: any) => {
+            if (!resp?.ok) setAudioError(resp?.reason || 'Failed to transfer ownership')
+          })
+        }}
+      />
+
       {/* Floating Chat Button */}
-      <button className="chatFab" onClick={() => setChatOpen(true)} aria-label="Open chat">
-        <FaComments size={22} />
-      </button>
+      {!chatOpen && (
+        <button className="chatFab" style={{ position: 'fixed' }} onClick={() => {
+          setChatOpen(true)
+          setUnreadChat(0)
+        }} aria-label="Open chat">
+          <FaComments size={22} />
+          {unreadChat > 0 && <span className="chatBadge">{Math.min(99, unreadChat)}</span>}
+        </button>
+      )}
+
+      {/* Floating Queue Button (only if queue has items) */}
+      {queue.length > 0 && !queueOpen && (
+        <button className="queueFab" onClick={() => setQueueOpen(true)} aria-label="Open queue">Queue</button>
+      )}
 
       {/* Chat Panel */}
       <ChatWidget
@@ -780,11 +797,22 @@ export default function App() {
         username={username}
         open={chatOpen}
         onClose={() => setChatOpen(false)}
+        onNewMessage={(m) => { if (!chatOpen) setUnreadChat(n => Math.min(99, n + 1)) }}
+      />
+
+      {/* Queue Panel */}
+      <QueueWidget
+        open={queueOpen}
+        items={queue}
+        canControl={canControl}
+        onPlayNow={playQueueItemNow}
+        onRemove={removeQueueItem}
+        onClose={() => setQueueOpen(false)}
       />
 
       {songsOpen && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.5)', display: 'grid', placeItems: 'center', zIndex: 50 }} onClick={() => setSongsOpen(false)}>
-          <div className="card" style={{ width: 'min(720px, 96vw)', maxHeight: '80vh', overflow: 'auto' }} onClick={e => e.stopPropagation()}>
+          <div id="songsCard" className="card songsCard" style={{ width: 'min(720px, 96vw)', maxHeight: '80vh', overflow: 'auto' }} onClick={e => e.stopPropagation()}>
             <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
               <h3 style={{ margin: 0 }}>Songs</h3>
               <div className="row" style={{ marginLeft: 'auto' }}>
@@ -833,6 +861,11 @@ export default function App() {
         onSeekTo={(sec) => canControl && socket.emit('control:seek', { roomId, positionSec: Math.max(0, Math.min(durationSec || 0, sec)) })}
         fmt={fmt}
       />
+      {trackName && (
+        <div className="mobileOnly trackBadge" style={{ position: 'fixed', left: 14, right: 14, bottom: 88, zIndex: 160 }}>
+          <span className="trackBadgeText">{trackName}</span>
+        </div>
+      )}
     </div>
   )
 }

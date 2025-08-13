@@ -1,4 +1,4 @@
-import React from 'react'
+import { memo } from 'react'
 
 type Props = {
   username: string
@@ -7,7 +7,7 @@ type Props = {
   onMakeAdmin: (targetName: string) => void
 }
 
-export function ParticipantsSidebar({ username, ownerName, participants, onMakeAdmin }: Props) {
+export const ParticipantsSidebar = memo(function ParticipantsSidebar({ username, ownerName, participants, onMakeAdmin }: Props) {
   const unique = Array.from(new Set(participants || []))
   unique.sort((a, b) => (a === ownerName ? -1 : b === ownerName ? 1 : a.localeCompare(b)))
 
@@ -36,7 +36,7 @@ export function ParticipantsSidebar({ username, ownerName, participants, onMakeA
       </div>
     </aside>
   )
-}
+})
 
 
 

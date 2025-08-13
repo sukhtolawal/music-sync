@@ -57,6 +57,7 @@ function schedulePlayForRoom(roomId) {
     state.lastUpdate = Date.now();
     io.to(roomId).emit('play', {
         trackUrl: state.trackUrl,
+        trackName: state.trackName,
         positionSec: state.positionSec,
         startAtServerMs: plannedStartAtMs
     });
@@ -356,6 +357,7 @@ io.on('connection', (socket) => {
             const currentPosition = getCurrentPositionSec(roomId);
             socket.emit('state:init', {
                 trackUrl: playbackState.trackUrl,
+                trackName: playbackState.trackName ?? null,
                 isPlaying: playbackState.isPlaying,
                 positionSec: currentPosition,
                 startTimeMs: playbackState.isPlaying ? playbackState.startTime : null,
@@ -369,6 +371,7 @@ io.on('connection', (socket) => {
                 const baseAtStart = currentPosition + delaySec;
                 socket.emit('play', {
                     trackUrl: playbackState.trackUrl,
+                    trackName: playbackState.trackName ?? null,
                     positionSec: baseAtStart,
                     startAtServerMs: plannedStartAtMs
                 });
@@ -407,7 +410,7 @@ io.on('connection', (socket) => {
     });
     // Load track
     socket.on('control:load', (data) => {
-        const { roomId, trackUrl } = data;
+        const { roomId, trackUrl, trackName } = data;
         if (!roomId || !trackUrl)
             return;
         const room = rooms.get(roomId);
@@ -421,12 +424,14 @@ io.on('connection', (socket) => {
             isPlaying: false,
             positionSec: 0,
             trackUrl,
+            trackName,
             startTime: Date.now(),
             lastUpdate: Date.now()
         });
         // Send to all clients in the room including sender
         io.to(roomId).emit('state:update', {
             trackUrl,
+            trackName: trackName ?? null,
             isPlaying: false,
             positionSec: 0,
             serverNowMs: Date.now()
@@ -529,10 +534,11 @@ io.on('connection', (socket) => {
                 isPlaying: false,
                 positionSec: 0,
                 trackUrl: item.url,
+                trackName: item.name,
                 startTime: Date.now(),
                 lastUpdate: Date.now()
             });
-            io.to(roomId).emit('state:update', { trackUrl: item.url, isPlaying: false, positionSec: 0, serverNowMs: Date.now() });
+            io.to(roomId).emit('state:update', { trackUrl: item.url, trackName: item.name, isPlaying: false, positionSec: 0, serverNowMs: Date.now() });
             // Put remaining queue back and broadcast
             queues.set(roomId, q);
             broadcastQueue(roomId);
@@ -579,10 +585,11 @@ io.on('connection', (socket) => {
                 isPlaying: false,
                 positionSec: 0,
                 trackUrl: next.url,
+                trackName: next.name,
                 startTime: Date.now(),
                 lastUpdate: Date.now()
             });
-            io.to(roomId).emit('state:update', { trackUrl: next.url, isPlaying: false, positionSec: 0, serverNowMs: Date.now() });
+            io.to(roomId).emit('state:update', { trackUrl: next.url, trackName: next.name, isPlaying: false, positionSec: 0, serverNowMs: Date.now() });
             queues.set(roomId, q);
             broadcastQueue(roomId);
             schedulePlayForRoom(roomId);
@@ -614,6 +621,7 @@ io.on('connection', (socket) => {
         // Send to all clients in the room including sender
         io.to(roomId).emit('play', {
             trackUrl: state.trackUrl,
+            trackName: state.trackName ?? null,
             positionSec: state.positionSec,
             startAtServerMs: plannedStartAtMs
         });
